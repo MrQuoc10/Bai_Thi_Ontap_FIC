@@ -1,144 +1,171 @@
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
-import os
-import re
+import os, re, random, time
 
-# --- CẤU HÌNH ---
 st.set_page_config(page_title="Hệ Thống Ôn Tập FIC 2026", layout="wide")
 
-# Khởi tạo Session State
-if 'high_scores' not in st.session_state:
-    st.session_state.high_scores = {} 
-if 'submitted_lessons' not in st.session_state:
-    st.session_state.submitted_lessons = set() 
-
-# Sắp xếp tự nhiên (Bài 1 -> Bài 2 -> Bài 10)
-def natural_sort_key(s):
-    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
-
-def get_file_path():
-    files = [f for f in os.listdir('.') if f.endswith('.xlsx') and not f.startswith('~$')]
-    return files[0] if files else "De_on_tap.xlsx"
+# --- 1. CSS & UTILS ---
+HIDE_SIDEBAR_CSS = "<style>[data-testid='stSidebar'] {display: none;} [data-testid='stSidebarNav'] {display: none;}</style>"
 
 @st.cache_data
-def load_all_data(file_path):
-    if not os.path.exists(file_path): return None
-    try:
-        wb = load_workbook(file_path, data_only=True)
-        ws = wb.active
-        all_lessons = {}
-        last_lesson_no, last_lesson_name = "", ""
-        
-        for row_idx in range(1, ws.max_row + 1):
-            val_a = ws.cell(row=row_idx, column=1).value 
-            val_b = ws.cell(row=row_idx, column=2).value 
-            if val_a and "Bài" in str(val_a):
-                last_lesson_no = str(val_a).strip()
-                last_lesson_name = str(val_b).strip() if val_b else ""
-            
-            if not last_lesson_no: continue
-            current_key = f"{last_lesson_no}: {last_lesson_name}"
-            
-            question = ws.cell(row=row_idx, column=4).value
-            if not question or str(question).strip() in ["Câu hỏi", "Thứ tự", "STT"]: continue
-            
-            options, correct_options = [], []
-            for col_idx in range(6, 12): # Cột F đến K
-                cell = ws.cell(row=row_idx, column=col_idx)
-                if cell.value is not None:
-                    val_str = str(cell.value).strip()
-                    options.append(val_str)
-                    fill = cell.fill
-                    if fill and fill.start_color and fill.start_color.index not in ("00000000", "FFFFFFFF", "0", "None"):
-                        correct_options.append(val_str)
+def load_all_data():
+    files = [f for f in os.listdir('.') if f.endswith('.xlsx') and not f.startswith('~$')]
+    if not files: return None
+    wb = load_workbook(files[0], data_only=True)
+    ws = wb.active
+    all_lessons = {}
+    last_no, last_name = "", ""
+    for r in range(1, ws.max_row + 1):
+        val_a = ws.cell(row=r, column=1).value
+        val_b = ws.cell(row=r, column=2).value
+        if val_a and "Bài" in str(val_a):
+            last_no = str(val_a).strip(); last_name = str(val_b).strip() if val_b else ""
+        if not last_no: continue
+        key = f"{last_no}: {last_name}"
+        ques = ws.cell(row=r, column=4).value
+        if not ques or str(ques).strip() in ["Câu hỏi", "STT"]: continue
+        opts, corrects = [], []
+        for c in range(6, 12):
+            cell = ws.cell(row=r, column=c)
+            if cell.value:
+                val = str(cell.value).strip(); opts.append(val)
+                # Nhận diện đáp án đúng qua màu nền
+                if cell.fill and cell.fill.start_color and str(cell.fill.start_color.index) not in ("00000000", "FFFFFFFF", "0", "None"):
+                    corrects.append(val)
+        if opts:
+            if key not in all_lessons: all_lessons[key] = []
+            all_lessons[key].append({"id": f"{r}", "question": ques, "options": opts, "correct": corrects})
+    return all_lessons
 
-            if options:
-                if current_key not in all_lessons: all_lessons[current_key] = []
-                all_lessons[current_key].append({
-                    "id": f"{row_idx}", "question": question, "options": options, "correct": correct_options
-                })
-        return all_lessons
-    except Exception as e:
-        st.error(f"Lỗi: {e}")
-        return None
+data = load_all_data()
 
-# --- XỬ LÝ DỮ LIỆU ---
-target_file = get_file_path()
-data_by_lesson = load_all_data(target_file)
-if not data_by_lesson: st.stop()
+# --- 2. STATE MANAGEMENT ---
+if "page" not in st.session_state: st.session_state.page = "Luyện tập"
+if "start_time" not in st.session_state: st.session_state.start_time = None
+if "last_lesson" not in st.session_state and data: 
+    st.session_state.last_lesson = sorted(data.keys())[0]
 
-# --- SIDEBAR ---
-st.sidebar.title("📂 Thư mục Bài học")
-sorted_keys = sorted(data_by_lesson.keys(), key=natural_sort_key)
-menu_display = []
-for k in sorted_keys:
-    score = st.session_state.high_scores.get(k, None)
-    label = f"{k} (Điểm: {score})" if score is not None else k
-    menu_display.append(label)
+def reset_to_practice():
+    st.session_state.page = "Luyện tập"
+    st.session_state.start_time = None
+    if "exam_list" in st.session_state: del st.session_state.exam_list
+    st.rerun()
 
-selected_label = st.sidebar.radio("Chọn bài học:", menu_display)
-selected_lesson = selected_label.split(" (Điểm:")[0]
+# --- 3. SIDEBAR ---
+if st.session_state.page != "Thi tổng hợp":
+    with st.sidebar:
+        st.title("⭐ FIC 2026")
+        if st.button("🔥 THI TỔNG HỢP (60 CÂU)", use_container_width=True, type="primary"):
+            all_q = []
+            for k in data: all_q.extend(data[k])
+            st.session_state.exam_list = random.sample(all_q, min(60, len(all_q)))
+            st.session_state.page = "Thi tổng hợp"
+            st.session_state.start_time = time.time()
+            st.rerun()
+        st.divider()
+        lesson_keys = sorted(data.keys(), key=lambda x: [int(t) if t.isdigit() else t.lower() for t in re.split('([0-9]+)', x)])
+        selected_lesson = st.radio("Chọn bài:", lesson_keys, index=lesson_keys.index(st.session_state.last_lesson) if st.session_state.last_lesson in lesson_keys else 0)
+        if st.session_state.last_lesson != selected_lesson:
+            st.session_state.last_lesson = selected_lesson
+            st.session_state.page = "Luyện tập"; st.rerun()
 
-# --- NỘI DUNG ---
-st.title(f"📖 {selected_lesson}")
-is_submitted = selected_lesson in st.session_state.submitted_lessons
-current_quiz = data_by_lesson[selected_lesson]
-user_answers = {}
-
-for item in current_quiz:
-    st.subheader(f"Câu hỏi: {item['question']}")
-    if len(item['correct']) > 1:
-        st.caption("ℹ️ *Chọn nhiều đáp án*")
-        selected = [opt for opt in item['options'] if st.checkbox(opt, key=f"c_{item['id']}_{opt}_{selected_lesson}", disabled=is_submitted)]
-        user_answers[item['id']] = selected
-    else:
-        ans = st.radio("Chọn đáp án đúng:", item['options'], index=None, key=f"r_{item['id']}_{selected_lesson}", disabled=is_submitted)
-        user_answers[item['id']] = ans
-
-    if is_submitted:
-        u_ans = user_answers.get(item['id'])
-        is_correct = (set(u_ans) == set(item['correct']) and len(u_ans) == len(item['correct'])) if isinstance(u_ans, list) else (u_ans == item['correct'][0] if item['correct'] else False)
-        if is_correct: st.success(f"🎯 Đúng! Đáp án: {', '.join(item['correct'])}")
-        else: st.error(f"❌ Sai! Đáp án đúng: {', '.join(item['correct'])}")
-    st.divider()
-
-# --- CHẤM ĐIỂM VÀ HIỂN THỊ KẾT QUẢ ---
-if not is_submitted:
-    if st.button("Nộp bài", type="primary", use_container_width=True):
-        score = 0
-        for item in current_quiz:
-            u_ans = user_answers.get(item['id'])
-            c_ans = item['correct']
-            
-            # Logic chấm điểm chặt chẽ
-            if isinstance(u_ans, list):
-                if set(u_ans) == set(c_ans) and len(u_ans) == len(c_ans):
-                    score += 1
-            elif u_ans == (c_ans[0] if c_ans else None):
-                score += 1
-        
-        # Cập nhật điểm cao nhất vào Sidebar
-        if score > st.session_state.high_scores.get(selected_lesson, 0):
-            st.session_state.high_scores[selected_lesson] = score
-        
-        st.session_state.submitted_lessons.add(selected_lesson)
-        st.rerun()
-else:
-    # TÍNH LẠI ĐIỂM HIỆN TẠI ĐỂ HIỂN THỊ DÒNG THÔNG BÁO
-    current_score = 0
-    for item in current_quiz:
-        u_ans = user_answers.get(item['id'])
-        if isinstance(u_ans, list):
-            if set(u_ans) == set(item['correct']) and len(u_ans) == len(item['correct']):
-                current_score += 1
-        elif u_ans == (item['correct'][0] if item['correct'] else None):
-            current_score += 1
-
-    # HIỂN THỊ DÒNG ĐIỂM ĐƠN GIẢN
-    st.write("---")
-    st.write(f"Kết quả: {current_score} / {len(current_quiz)} câu đúng.")
+# --- 4. GIAO DIỆN CÂU HỎI ---
+def render_question(item, mode="practice"):
+    is_multiselect = len(item['correct']) > 1
+    st.write(f"**{item['question']}**" + (" *(Chọn nhiều đáp án)*" if is_multiselect else ""))
     
-    if st.button("Làm lại bài tập"):
-        st.session_state.submitted_lessons.remove(selected_lesson)
-        st.rerun()
+    if mode == "practice":
+        if is_multiselect:
+            user_ans = []
+            for opt in item['options']:
+                if st.checkbox(opt, key=f"check_{item['id']}_{opt}"):
+                    user_ans.append(opt)
+            
+            if st.button("Kiểm tra", key=f"btn_{item['id']}"):
+                if set(user_ans) == set(item['correct']):
+                    st.success("✅ Chính xác!")
+                else:
+                    st.error(f"❌ Sai. Đáp án đúng: {', '.join(item['correct'])}")
+        else:
+            ans = st.radio("Trả lời:", item['options'], index=None, key=f"prac_{item['id']}")
+            if ans:
+                if ans in item['correct']: st.success("✅ Chính xác!")
+                else: st.error(f"❌ Sai. Đáp án đúng: {', '.join(item['correct'])}")
+    else: # Mode Thi thử / Thi tổng hợp
+        if is_multiselect:
+            user_ans = []
+            for opt in item['options']:
+                if st.checkbox(opt, key=f"exam_{item['id']}_{opt}"):
+                    user_ans.append(opt)
+            return user_ans
+        else:
+            return st.radio("Chọn:", item['options'], index=None, key=f"exam_{item['id']}", label_visibility="collapsed")
+
+# --- 5. LOGIC TRANG ---
+if not data: st.error("Không tìm thấy dữ liệu!"); st.stop()
+
+if st.session_state.page == "Thi tổng hợp":
+    st.markdown(HIDE_SIDEBAR_CSS, unsafe_allow_html=True)
+    st.title("🏆 Bài Thi Tổng Hợp (60 Câu)")
+    elapsed = time.time() - st.session_state.start_time
+    remaining = max(0, 3600 - int(elapsed))
+    st.metric("Thời gian còn lại", f"{remaining//60:02d}:{remaining%60:02d}")
+
+    ans_dict = {}
+    for i, item in enumerate(st.session_state.exam_list):
+        st.write(f"--- Câu {i+1} ---")
+        ans_dict[item['id']] = render_question(item, mode="exam")
+    
+    st.divider()
+    c1, c2 = st.columns([1, 5])
+    if c1.button("🚪 Thoát bài", use_container_width=True): reset_to_practice()
+    if c2.button("📤 Nộp bài thi tổng", type="primary", use_container_width=True) or remaining <= 0:
+        correct = 0
+        for item in st.session_state.exam_list:
+            u_ans = ans_dict.get(item['id'])
+            if isinstance(u_ans, list):
+                if set(u_ans) == set(item['correct']): correct += 1
+            elif u_ans == (item['correct'][0] if item['correct'] else None):
+                correct += 1
+        st.session_state.last_score = round((correct / len(st.session_state.exam_list)) * 100, 2)
+        st.session_state.page = "Kết quả thi"; st.rerun()
+    time.sleep(1); st.rerun(); st.stop()
+
+elif st.session_state.page == "Thi thử bài":
+    st.title(f"⏱️ Thi thử: {st.session_state.last_lesson}")
+    ans_dict = {}
+    current_q = data[st.session_state.last_lesson]
+    for i, item in enumerate(current_q):
+        st.write(f"--- Câu {i+1} ---")
+        ans_dict[item['id']] = render_question(item, mode="exam")
+    
+    st.divider()
+    c1, c2 = st.columns([1, 5])
+    if c1.button("🚪 Hủy thi"): reset_to_practice()
+    if c2.button("📤 Nộp bài thi thử", type="primary", use_container_width=True):
+        correct = 0
+        for item in current_q:
+            u_ans = ans_dict.get(item['id'])
+            if isinstance(u_ans, list):
+                if set(u_ans) == set(item['correct']): correct += 1
+            elif u_ans == (item['correct'][0] if item['correct'] else None):
+                correct += 1
+        st.session_state.last_score = round((correct / len(current_q)) * 100, 2)
+        st.session_state.page = "Kết quả thi"; st.rerun()
+    st.stop()
+
+elif st.session_state.page == "Kết quả thi":
+    st.title("🏁 Kết quả bài thi")
+    st.header(f"Điểm của bạn: {st.session_state.last_score} / 100")
+    if st.button("Quay lại Luyện tập"): reset_to_practice()
+    st.stop()
+
+else:
+    st.title(f"📖 Luyện tập: {st.session_state.last_lesson}")
+    if st.button(f"🚀 BẮT ĐẦU THI THỬ {st.session_state.last_lesson.split(':')[0]}", type="secondary"):
+        st.session_state.page = "Thi thử bài"; st.rerun()
+    st.divider()
+    for item in data[st.session_state.last_lesson]:
+        render_question(item, mode="practice")
+        st.write("")
